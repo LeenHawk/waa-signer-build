@@ -1,0 +1,177 @@
+name: Build
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: linux-amd64, zig: x86_64-linux, zig_ext: tar.xz }
+          - { os: ubuntu-24.04-arm, target: linux-arm64, zig: aarch64-linux, zig_ext: tar.xz }
+          - { os: macos-15, target: darwin-arm64, zig: aarch64-macos, zig_ext: tar.xz }
+          - { os: windows-2025, target: windows-amd64, zig: x86_64-windows, zig_ext: zip }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned versions
+        run: grep -E '^[A-Z_]+=' upstream.env >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_REF }}
+          path: upstream
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      # Both downloads are checked against checksums.txt. The upstream build
+      # script would otherwise fall back to third-party download mirrors.
+      - name: Fetch Zig and SpiderMonkey
+        run: |
+          verify() {
+            local file="$1" name expected actual
+            name="$(basename "$file")"
+            expected="$(awk -v n="$name" '$2 == n { print $1 }' checksums.txt)"
+            test -n "$expected" || { echo "no checksum recorded for $name" >&2; exit 1; }
+            if command -v sha256sum >/dev/null; then
+              actual="$(sha256sum "$file" | cut -d' ' -f1)"
+            else
+              actual="$(shasum -a 256 "$file" | cut -d' ' -f1)"
+            fi
+            test "$expected" = "$actual" || { echo "checksum mismatch for $name" >&2; exit 1; }
+            echo "verified $name"
+          }
+
+          mkdir -p .tools upstream/waa-signer/.deps
+
+          zig="zig-${{ matrix.zig }}-${ZIG_VERSION}"
+          curl -fL --retry 3 -o ".tools/${zig}.${{ matrix.zig_ext }}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${zig}.${{ matrix.zig_ext }}"
+          verify ".tools/${zig}.${{ matrix.zig_ext }}"
+          if [ "${{ matrix.zig_ext }}" = zip ]; then
+            unzip -q ".tools/${zig}.zip" -d .tools
+          else
+            tar -xJf ".tools/${zig}.tar.xz" -C .tools
+          fi
+          if command -v cygpath >/dev/null; then
+            cygpath -w "$PWD/.tools/${zig}" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/.tools/${zig}" >> "$GITHUB_PATH"
+          fi
+
+          sm="spidermonkey-${SM_VERSION}-${{ matrix.target }}.tar.gz"
+          curl -fL --retry 3 -o "upstream/waa-signer/.deps/${sm}" \
+            "https://github.com/${SM_REPO}/releases/download/${SM_VERSION}/${sm}"
+          verify "upstream/waa-signer/.deps/${sm}"
+
+      - name: Build
+        if: runner.os != 'Windows'
+        run: |
+          zig version
+          bash upstream/waa-signer/build.sh
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          zig version
+          ./upstream/waa-signer/build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check that the signer starts
+        run: |
+          bin=upstream/waa-signer/bin/waa-signer
+          [ "$RUNNER_OS" = Windows ] && bin="${bin}.exe"
+          mkdir -p .state
+          "$bin" -listen 127.0.0.1:18081 -state-dir "$PWD/.state" > signer.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do
+            if health="$(curl -fsS -m 2 http://127.0.0.1:18081/health)"; then break; fi
+            sleep 1
+          done
+          kill "$pid" || true
+          cat signer.log
+          echo "health: ${health:-none}"
+          echo "${health:-}" | grep -q '"ok":true'
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="dev-${GITHUB_SHA::7}"
+          name="waa-signer-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          bin=waa-signer
+          [ "$RUNNER_OS" = Windows ] && bin=waa-signer.exe
+          cp "upstream/waa-signer/bin/${bin}" "dist/${name}/"
+          cp NOTICE.md "dist/${name}/"
+          cp -r licenses "dist/${name}/"
+          printf 'source: https://github.com/%s/tree/%s/waa-signer\nspidermonkey: https://github.com/%s/tree/%s\n' \
+            "$UPSTREAM_REPO" "$UPSTREAM_REF" "$SM_REPO" "$SM_VERSION" > "dist/${name}/SOURCE.txt"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "${name}.zip" "${name}" > /dev/null
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+          fi
+          rm -r "${name}"
+          ls -l
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -a; . ./upstream.env; set +a
+          (cd dist && sha256sum waa-signer-* > SHA256SUMS && cat SHA256SUMS)
+          {
+            echo "Built from [${UPSTREAM_REPO}@${UPSTREAM_REF::7}](https://github.com/${UPSTREAM_REPO}/tree/${UPSTREAM_REF}/waa-signer)"
+            echo "with SpiderMonkey [${SM_VERSION}](https://github.com/${SM_REPO}/releases/tag/${SM_VERSION}), Go ${GO_VERSION} and Zig ${ZIG_VERSION}."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md

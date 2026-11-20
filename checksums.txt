@@ -1,0 +1,8 @@
+d3ecebf1890355426ad261ab8723038849a524b348af53e1bb440ca53cc2cacb  spidermonkey-v152.0.4-aistudio2api.1-linux-amd64.tar.gz
+b3c9539b8d8378d99f86b267e0e3d007dd01ff80acebf4f52f3e1d6ac04d9d00  spidermonkey-v152.0.4-aistudio2api.1-linux-arm64.tar.gz
+19f690d52ce2cfe7dbaedcc9771976145fff0dbd81f24e89a2dd094a1424b673  spidermonkey-v152.0.4-aistudio2api.1-darwin-arm64.tar.gz
+942a3b57b202f899d799cac678b7471d01d0b34714070f0810c18fca37ffd721  spidermonkey-v152.0.4-aistudio2api.1-windows-amd64.tar.gz
+24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  zig-x86_64-linux-0.14.1.tar.xz
+f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b  zig-aarch64-linux-0.14.1.tar.xz
+39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa  zig-aarch64-macos-0.14.1.tar.xz
+554f5378228923ffd558eac35e21af020c73789d87afeabf4bfd16f2e6feed2c  zig-x86_64-windows-0.14.1.zip
